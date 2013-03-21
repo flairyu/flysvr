@@ -266,7 +266,8 @@ int process_read_event(int epollfd, struct epoll_event* ev) {
 			}
 		} else if (readlen == 0) {
 			del_client_event(epollfd, ev);
-			fs_log(LOG_I, "read length is zero.");
+			fs_log(LOG_W, "read length is zero.");
+			return -2;
 		}
 	}
 	return client->readbuff.datalen;
@@ -294,7 +295,8 @@ int process_write_event(int epollfd, struct epoll_event* ev) {
 			}
 		} else if (writelen == 0) {
 			del_client_event(epollfd, ev);
-			fs_log(LOG_I, "write length is zero.");
+			fs_log(LOG_W, "write length is zero.");
+			return -2;
 		}
 	}
 	return write_total;
@@ -368,18 +370,39 @@ int mainLoop() {
 					fs_log(LOG_E, "accept");
 					continue;
 				}
-				errid =	add_client_event(epollfd, conn_sock, (struct sockaddr*)&local);
+				errid =	add_client_event(epollfd, conn_sock, 
+						(struct sockaddr*)&local);
 				if (errid < 0) {
 					fs_log(LOG_E, "add_client_event");
 					continue;
 				}
 			} 
 			else {
+				if (events[n].events & EPOLLRDHUP) {
+					fs_log(LOG_I, "EPOLLRDHUP");
+					del_client_event(epollfd, &events[n]);
+					continue;
+				} 
+				
+				if (events[n].events & EPOLLHUP) {
+					fs_log(LOG_I, "EPOLLHUP");
+					del_client_event(epollfd, &events[n]);
+					continue;
+				} 
+				
+				if (events[n].events & EPOLLERR) {
+					fs_log(LOG_W, "EPOLLERR");
+					del_client_event(epollfd, &events[n]);
+					continue;
+				}
+
 				if (events[n].events & EPOLLIN) {
 					errid = process_read_event(epollfd, &events[n]);
 					fs_log(LOG_I, "EPOLLIN:%d", errid);
 					if (errid>0) {
 						on_read_data(&client_list, events[n].data.u32);
+					} else if (errid<0) {
+						continue;
 					}
 				}
 				
@@ -388,23 +411,11 @@ int mainLoop() {
 					fs_log(LOG_I, "EPOLLOUT:%d", errid);
 					if (errid>0) {
 						on_write_data(&client_list, events[n].data.u32);
+					} else if (errid<0) {
+						continue;
 					}
 				} 
 				
-				if (events[n].events & EPOLLRDHUP) {
-					fs_log(LOG_I, "EPOLLRDHUP");
-					del_client_event(epollfd, &events[n]);
-				} 
-				
-				if (events[n].events & EPOLLHUP) {
-					fs_log(LOG_I, "EPOLLHUP");
-					del_client_event(epollfd, &events[n]);
-				} 
-				
-				if (events[n].events & EPOLLERR) {
-					fs_log(LOG_W, "EPOLLERR");
-					del_client_event(epollfd, &events[n]);
-				}
 			}
 		}
 
