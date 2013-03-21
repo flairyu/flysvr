@@ -37,8 +37,10 @@
 #include <stdarg.h>
 #include <string.h>
 #include <signal.h>
+#include <dlfcn.h>
+#include <dirent.h>
 
-#define MAX_EVENTS 10  /*max process events count*/
+#define MAX_EVENTS 50  /*max process events count*/
 #define LISTEN_BACKLOG 50 /*max listen client count one time*/
 #define LISTEN_PORT 8477 /* listen port */
 #define min(x,y) ((x)<(y)?(x):(y))
@@ -46,6 +48,9 @@
 
 static struct fs_client_list client_list = {0}; /* user list */
 static int epollfd = 0;
+static struct fs_context g_context = {0};
+static char VERSION[] = "1.0.20130324";
+static char PLUGIN_DIR[] = "./plugins/";
 
 void fs_log(int level, char* fmt, ...) {
 
@@ -128,10 +133,6 @@ void fs_client_free(struct fs_client* client) {
 	fs_buffer_free(&client->writebuff);
 }
 
-void do_use_fd(struct fs_client* client) {
-	fs_log(LOG_I, "use fd:%d", client->fd);
-}
-
 void setnonblocking(int fd) {
 	int flag = 0;
 	flag = fcntl(fd, F_GETFL, 0);
@@ -203,6 +204,7 @@ int add_client_event(int epollfd, int fd, struct sockaddr* addr) {
 	struct epoll_event ev;
 	int cid = 0;
 	struct fs_client* client;
+	int i;
 
 	setnonblocking(fd);
 	cid = get_idle_client(&client_list);
@@ -224,19 +226,25 @@ int add_client_event(int epollfd, int fd, struct sockaddr* addr) {
 		fs_log(LOG_E, "epoll_ctl_add");
 		return -2;
 	} else {
-		do_use_fd(client);
 		fs_log(LOG_I, "accept a new client:%s:%d", 
 							(const char*)inet_ntoa(client->addr.sin_addr)
 							, ntohs(client->addr.sin_port));
 	} 
 
-	return 0;
+	return cid;
 }
 
 int del_client_event(int epollfd, struct epoll_event* ev) {
 	struct fs_client* client;
-	int cid = 0;
+	int i, cid = 0;
 	cid = ev->data.u32;
+	/*call event listener to process close client event*/
+	for (i=0; i<g_context.event_listeners_count; i++) {
+		if ( g_context.event_listeners[i].on_close_client ) {
+			g_context.event_listeners[i].on_close_client(&g_context, cid);
+		}
+	}
+	
 	client = &client_list.clients[cid];
 	if (epoll_ctl(epollfd, EPOLL_CTL_DEL, client->fd, ev) == -1) {
 		fs_log(LOG_E, "epoll_ctl_del");
@@ -303,29 +311,31 @@ int process_write_event(int epollfd, struct epoll_event* ev) {
 }
 
 int on_read_data(struct fs_client_list* list, int cid) {
-	struct fs_client* client;
-	char   buff[FS_BUFFER_BLOCK_SIZE];
-	int    len;
-	client = &list->clients[cid];
-	for(; client->readbuff.datalen>0; ) {
-		len = fs_buffer_read(&client->readbuff, buff, FS_BUFFER_BLOCK_SIZE);
-		if (len>0) {
-			fs_buffer_write(&client->writebuff, buff, len);
-		} else {
-			break;
+	int i;
+	/*call event listener to process read event*/
+	for (i=0; i<g_context.event_listeners_count; i++) {
+		if ( g_context.event_listeners[i].on_recv_data ) {
+			g_context.event_listeners[i].on_recv_data(&g_context, cid);
 		}
 	}
 	return 0;
 }
 
 int on_write_data(struct fs_client_list* list, int cid) {
+	int i;
+	/*call event listener to process write event*/
+	for (i=0; i<g_context.event_listeners_count; i++) {
+		if ( g_context.event_listeners[i].on_write_data ) {
+			g_context.event_listeners[i].on_write_data(&g_context, cid);
+		}
+	}
     return 0;
 }
 
 int mainLoop() {
 	struct epoll_event ev, events[MAX_EVENTS];
 	int listen_sock, conn_sock, nfds;
-	int n;
+	int n,i;
 	struct sockaddr_in local;
 	int addrlen;
 	char address_string[32];
@@ -375,6 +385,14 @@ int mainLoop() {
 				if (errid < 0) {
 					fs_log(LOG_E, "add_client_event");
 					continue;
+				}
+
+				/*call event listener to process new client event*/
+				for (i=0; i<g_context.event_listeners_count; i++) {
+					if ( g_context.event_listeners[i].on_new_client ) {
+						g_context.event_listeners[i].on_new_client(&g_context, 
+								errid);
+					}
 				}
 			} 
 			else {
@@ -429,13 +447,134 @@ int mainLoop() {
 	return 0;
 }
 
+int write_data(char* buffer, int buffer_len, int cid) {
+	struct fs_client* client;
+	struct epoll_event ev;
+	assert(cid>=0 && cid<MAX_CLIENT_COUNT);
+	client = &client_list.clients[cid];
+	assert(client->fd != 0);
+	assert(client->cid == cid);
+	fs_buffer_write(&client->writebuff, buffer, buffer_len);
+	ev.data.u32 = cid;
+	return process_write_event(epollfd, &ev);
+}
+
+int close_client(int cid) {
+	struct epoll_event ev;
+	ev.data.u32 = cid;
+	return del_client_event(epollfd, &ev);
+}
+
+char* get_version() {
+	return VERSION;
+}
+
+void loadPlugin(char* filepath) {
+
+	struct fs_event_listener *listener;
+	void* dp;
+	char* errstr;
+
+	if (g_context.event_listeners_count >= MAX_EVENT_LISTENER_COUNT) {
+		fs_log(LOG_W, "event listener is too more.");
+		return ;
+	}
+
+	fs_log(LOG_I, "load:%s", filepath);
+
+	dp = dlopen(filepath, RTLD_LAZY);
+	if (dp==NULL) {
+		fs_log(LOG_E, dlerror());
+		exit(EXIT_FAILURE);
+	}
+
+	listener = &g_context.event_listeners[ g_context.event_listeners_count ];
+
+	dlerror();
+	listener->on_new_client = dlsym(dp, "on_new_client");
+	errstr = dlerror();
+	if(errstr) {
+		fs_log(LOG_E, errstr);
+		exit(EXIT_FAILURE);
+	}
+
+
+	dlerror();
+	listener->on_recv_data= dlsym(dp, "on_recv_data");
+	errstr = dlerror();
+	if(errstr) {
+		fs_log(LOG_E, errstr);
+		exit(EXIT_FAILURE);
+	}
+	
+	dlerror();
+	listener->on_close_client = dlsym(dp, "on_close_client");
+	errstr = dlerror();
+	if(errstr) {
+		fs_log(LOG_E, errstr);
+		exit(EXIT_FAILURE);
+	}
+
+	dlerror();
+	listener->on_write_data = dlsym(dp, "on_write_data");
+	errstr = dlerror();
+	if(errstr) {
+		fs_log(LOG_E, errstr);
+		exit(EXIT_FAILURE);
+	}
+
+	//dlclose(dp);
+	listener->dp = dp;
+	g_context.event_listeners_count++;
+}
+
+void loadAllPlugins() {
+	char infile[255];
+	struct dirent *ptr = NULL;
+	DIR* dir;
+	dir = opendir(g_context.plugin_dir);
+	if (dir == NULL) {
+		fs_log(LOG_E, "opendir");
+		exit(EXIT_FAILURE);
+	}
+	while((ptr = readdir(dir)) != NULL) {
+		if (ptr->d_name[0] != '.') {
+			memset(infile, 0, 255);
+			sprintf(infile, "%s%s", g_context.plugin_dir, ptr->d_name);
+			loadPlugin(infile);
+		}
+	}
+	fs_log(LOG_I, "load all plugins done.");
+}
+
 void initAll() {
 	int i=0;
+	
 	client_list.idle_top = 1;
 	for (i=0; i<MAX_CLIENT_COUNT; i++) {
 		client_list.idle_clients[i] = i;
 		fs_client_init(&client_list.clients[i]);
 	}
+	g_context.max_client_count = MAX_CLIENT_COUNT;
+	g_context.fs_buffer_block_size = FS_BUFFER_BLOCK_SIZE;
+	// g_context.localaddr = ;
+	strcpy(g_context.plugin_dir, PLUGIN_DIR);
+	g_context.client_list = &client_list;
+
+	g_context.log = fs_log;
+	g_context.b_init = fs_buffer_init;
+	g_context.b_read = fs_buffer_read;
+	g_context.b_write = fs_buffer_write;
+	g_context.b_free = fs_buffer_free;
+
+	memset(g_context.event_listeners, 0, sizeof(g_context.event_listeners));
+	g_context.event_listeners_count = 0;
+
+	g_context.write_data = write_data;
+	g_context.close_client = close_client;
+	g_context.get_version = get_version;
+	
+	loadAllPlugins();
 }
 
 void releaseAll() {
@@ -452,6 +591,13 @@ void releaseAll() {
 	/* delete listen sock */
 	ev.data.u32 = 0;
 	del_client_event(epollfd, &ev);
+
+	/* close plugin libs */
+	for (i=0; i<g_context.event_listeners_count; i++) {
+		dlclose( g_context.event_listeners[i].dp );
+	}
+	
+	g_context.event_listeners_count = 0;
 }
 
 void sigrouter(int sig) {
@@ -480,6 +626,6 @@ int main(int argc, char** argv) {
 	initAll();
 	mainLoop();
 	releaseAll();
-	
+
 	return 0;
 }

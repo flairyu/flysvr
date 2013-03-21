@@ -23,35 +23,7 @@
 #ifndef __FLYSVR__H__
 #define __FLYSVR__H__
 
-#define LOG_V 0
-#define LOG_D 1
-#define LOG_I 2
-#define LOG_W 3
-#define LOG_E 4
-
-#define MAX_CLIENT_COUNT 32767
-#define FS_BUFFER_BLOCK_SIZE 1024
-#include <netinet/ip.h>
-
-struct fs_buffer {
-	char* buff;
-	int   bufflen;
-	int   datalen;
-};
-
-struct fs_client {
-	int fd;
-	int cid;
-	struct sockaddr_in addr;
-	void* user_data;
-	struct fs_buffer readbuff, writebuff;
-};
-
-struct fs_client_list {
-	int idle_top;
-	int idle_clients[MAX_CLIENT_COUNT];
-	struct fs_client clients[MAX_CLIENT_COUNT];
-};
+#include "fstype.h"
 
 void fs_log(int level, char* fmt, ...);
 void fs_buffer_init(struct fs_buffer* buff);
