@@ -43,6 +43,8 @@
 #define MAX_EVENTS 50  /*max process events count*/
 #define LISTEN_BACKLOG 50 /*max listen client count one time*/
 #define LISTEN_PORT 8477 /* listen port */
+#define USE_UDP 1 /*use udp is ture*/
+
 #define min(x,y) ((x)<(y)?(x):(y))
 #define max(x,y) ((x)>(y)?(x):(y))
 
@@ -123,7 +125,7 @@ void fs_client_init(struct fs_client* client) {
 
 void fs_client_free(struct fs_client* client) {
 	if(client->fd!=0){
-		fs_log(LOG_I, "close:%d", client->fd);
+		fs_log(LOG_I, "close cid:%d fd:%d", client->cid, client->fd);
 		close(client->fd);
 	}
 	client->fd = 0;
@@ -180,6 +182,35 @@ int setupListenSocket(int port) {
 	return sfd;
 }
 
+int setupUdpSocket(int port) {
+	int sfd, retval;
+	struct sockaddr_in myaddr;
+
+	fs_log(LOG_I, "setup udp socket...");
+
+	/* first ,create a listening socket */
+	sfd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sfd == -1) {
+		fs_log(LOG_E, "socket");
+		exit(EXIT_FAILURE);
+	}
+
+	memset(&myaddr, 0, sizeof(struct sockaddr));
+	myaddr.sin_family = AF_INET;
+	myaddr.sin_port = htons(port);
+	myaddr.sin_addr.s_addr = INADDR_ANY;
+
+	retval = bind( sfd, (struct sockaddr*)&myaddr, sizeof(struct sockaddr));
+	if (retval == -1) {
+		fs_log(LOG_E, "bind");
+		exit(EXIT_FAILURE);
+	}
+
+	fs_log(LOG_I, "udp done![%d]", sfd);
+	return sfd;
+}
+
+
 int get_idle_client(struct fs_client_list* list) {
 	int ci = 0;
 	if (list->idle_top >= MAX_CLIENT_COUNT) return -1; /* no idle client */
@@ -226,8 +257,9 @@ int add_client_event(int epollfd, int fd, struct sockaddr* addr) {
 		fs_log(LOG_E, "epoll_ctl_add");
 		return -2;
 	} else {
-		fs_log(LOG_I, "accept a new client:%s:%d", 
-							(const char*)inet_ntoa(client->addr.sin_addr)
+		fs_log(LOG_I, "accept a new client:cid:%d ip:%s port:%d"
+							, cid
+							, (const char*)inet_ntoa(client->addr.sin_addr)
 							, ntohs(client->addr.sin_port));
 	} 
 
@@ -238,19 +270,21 @@ int del_client_event(int epollfd, struct epoll_event* ev) {
 	struct fs_client* client;
 	int i, cid = 0;
 	cid = ev->data.u32;
-	/*call event listener to process close client event*/
-	for (i=0; i<g_context.event_listeners_count; i++) {
-		if ( g_context.event_listeners[i].on_close_client ) {
-			g_context.event_listeners[i].on_close_client(&g_context, cid);
+	if(cid<MAX_CLIENT_COUNT) {
+		/*call event listener to process close client event*/
+		for (i=0; i<g_context.event_listeners_count; i++) {
+			if ( g_context.event_listeners[i].on_close_client ) {
+				g_context.event_listeners[i].on_close_client(&g_context, cid);
+			}
 		}
 	}
-	
+
 	client = &client_list.clients[cid];
 	if (epoll_ctl(epollfd, EPOLL_CTL_DEL, client->fd, ev) == -1) {
 		fs_log(LOG_E, "epoll_ctl_del");
 	}
-	set_idle_client(&client_list, cid);
-	fs_log(LOG_I, "del client.");
+	if(cid<MAX_CLIENT_COUNT) set_idle_client(&client_list, cid);
+	fs_log(LOG_I, "del client cid:%d", cid);
 	return 0;
 }
 
@@ -341,10 +375,11 @@ int mainLoop() {
 	char address_string[32];
 	int errid = 0;
 	struct fs_client* client;
+	char buff[FS_BUFFER_BLOCK_SIZE];
+	int recvlen;
 
 	/* Set up listening socket, 'listen_sock' */
 	listen_sock = setupListenSocket(LISTEN_PORT);
-
 
 	epollfd = epoll_create(MAX_EVENTS);
 	if (epollfd == -1) {
@@ -358,10 +393,21 @@ int mainLoop() {
 	client_list.clients[0].fd = listen_sock;
 	ev.events = EPOLLIN;
 	ev.data.u32 = 0; /* get_idle_client(&client_list); */
-
 	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, listen_sock, &ev) == -1) {
 		fs_log(LOG_E, "epoll_ctl: listen_sock");
 		exit(EXIT_FAILURE);
+	}
+
+	/* setup udp */
+	if (g_context.use_udp) {
+		g_context.udp->fd = setupUdpSocket(LISTEN_PORT);
+		g_context.udp->cid = MAX_CLIENT_COUNT;
+		ev.events = EPOLLIN;
+		ev.data.u32 = MAX_CLIENT_COUNT;
+		if (epoll_ctl(epollfd, EPOLL_CTL_ADD, g_context.udp->fd, &ev) == -1) {
+			fs_log(LOG_E, "epoll_ctl: udp_sock");
+			exit(EXIT_FAILURE);
+		}
 	}
 
 	for (;;) {
@@ -394,8 +440,22 @@ int mainLoop() {
 								errid);
 					}
 				}
-			} 
-			else {
+			} else if( g_context.use_udp &&
+					events[n].data.u32 == MAX_CLIENT_COUNT ) {
+				/*process udp events */
+				errid = sizeof(struct sockaddr);
+				recvlen = recvfrom( g_context.udp->fd, buff, FS_BUFFER_BLOCK_SIZE
+						, 0 , (struct sockaddr*)&local,  &errid);
+				if(recvlen>0) {
+					/*call event listener to process udp recv event*/
+					for (i=0; i<g_context.event_listeners_count; i++) {
+						if ( g_context.event_listeners[i].on_recv_from ) {
+							g_context.event_listeners[i].on_recv_from(&g_context, 
+									buff, recvlen, (struct sockaddr_in*)&local);
+						}
+					}
+				}
+			} else {
 				if (events[n].events & EPOLLRDHUP) {
 					fs_log(LOG_I, "EPOLLRDHUP");
 					del_client_event(epollfd, &events[n]);
@@ -445,6 +505,16 @@ int mainLoop() {
 	del_client_event(epollfd, &ev);
 
 	return 0;
+}
+
+int send_to(char* buffer, int buffer_len, struct sockaddr_in* toaddr) {
+	char buff[FS_BUFFER_BLOCK_SIZE];
+	int retval = 0;
+	if(g_context.use_udp == 0) return 0;
+	if(g_context.udp->fd == 0) return 0;
+	retval = sendto(g_context.udp->fd, buffer, buffer_len, 0, 
+			(struct sockaddr*) toaddr, sizeof(struct sockaddr_in));
+	return retval;
 }
 
 int write_data(char* buffer, int buffer_len, int cid) {
@@ -523,6 +593,14 @@ void loadPlugin(char* filepath) {
 		exit(EXIT_FAILURE);
 	}
 
+	dlerror();
+	listener->on_recv_from = dlsym(dp, "on_recv_from");
+	errstr = dlerror();
+	if(errstr) {
+		fs_log(LOG_E, errstr);
+		exit(EXIT_FAILURE);
+	}
+
 	//dlclose(dp);
 	listener->dp = dp;
 	g_context.event_listeners_count++;
@@ -555,11 +633,17 @@ void initAll() {
 		client_list.idle_clients[i] = i;
 		fs_client_init(&client_list.clients[i]);
 	}
+	
 	g_context.max_client_count = MAX_CLIENT_COUNT;
 	g_context.fs_buffer_block_size = FS_BUFFER_BLOCK_SIZE;
+	
 	// g_context.localaddr = ;
 	strcpy(g_context.plugin_dir, PLUGIN_DIR);
 	g_context.client_list = &client_list;
+
+	g_context.use_udp = USE_UDP; /*is use udp?*/
+	g_context.udp = &client_list.clients[MAX_CLIENT_COUNT]; /*last for udp*/
+	fs_client_init(g_context.udp); /* init udp instance */
 
 	g_context.log = fs_log;
 	g_context.b_init = fs_buffer_init;
@@ -570,6 +654,7 @@ void initAll() {
 	memset(g_context.event_listeners, 0, sizeof(g_context.event_listeners));
 	g_context.event_listeners_count = 0;
 
+	g_context.send_to = send_to;
 	g_context.write_data = write_data;
 	g_context.close_client = close_client;
 	g_context.get_version = get_version;
@@ -591,6 +676,12 @@ void releaseAll() {
 	/* delete listen sock */
 	ev.data.u32 = 0;
 	del_client_event(epollfd, &ev);
+
+	/* delete udp sock */
+	if (g_context.use_udp) {
+		ev.data.u32 = MAX_CLIENT_COUNT;
+		del_client_event(epollfd, &ev);
+	}
 
 	/* close plugin libs */
 	for (i=0; i<g_context.event_listeners_count; i++) {

@@ -31,8 +31,8 @@ struct fs_client {
 
 struct fs_client_list {
 	int idle_top;
-	int idle_clients[MAX_CLIENT_COUNT];
-	struct fs_client clients[MAX_CLIENT_COUNT];
+	int idle_clients[MAX_CLIENT_COUNT+1]; /* last for udp */
+	struct fs_client clients[MAX_CLIENT_COUNT+1];
 };
 
 typedef void (*FS_LOG)(int level, char* fmt, ...);
@@ -45,7 +45,11 @@ typedef int (*FS_ON_NEW_CLIENT)(struct fs_context* context, int cid);
 typedef int (*FS_ON_RECV_DATA)(struct fs_context* context, int cid);
 typedef int (*FS_ON_CLOSE_CLIENT)(struct fs_context* context, int cid);
 typedef int (*FS_ON_WRITE_DATA)(struct fs_context* context, int cid);
+typedef int (*FS_ON_RECV_FROM)(struct fs_context* context, char* data, int length,
+		struct sockaddr_in* fromaddr);
 
+typedef int (*FS_SEND_TO) (char* buffer, int buffer_len, 
+		struct sockaddr_in* toaddr);
 typedef int (*FS_WRITE_DATA)(char* buffer, int buffer_len, int cid);
 typedef int (*FS_CLOSE_CLIENT)(int cid);
 typedef char* (*FS_GET_VERSION)();
@@ -56,6 +60,7 @@ struct fs_event_listener {
 	FS_ON_RECV_DATA on_recv_data;
 	FS_ON_CLOSE_CLIENT on_close_client;
 	FS_ON_WRITE_DATA on_write_data;
+	FS_ON_RECV_FROM on_recv_from; /*used for udp*/
 };
 
 struct fs_context {
@@ -63,9 +68,12 @@ struct fs_context {
 	int fs_buffer_block_size;
 	struct sockaddr_in localaddr;
 	struct fs_client_list* client_list;
+	struct fs_client* udp;
+	char plugin_dir[255];
+	int use_udp; /*is use udp server*/
+
 	int event_listeners_count;
 	struct fs_event_listener event_listeners[MAX_EVENT_LISTENER_COUNT];
-	char plugin_dir[255];
 
 	FS_LOG log;
 	FS_BUFFER_INIT b_init;
@@ -73,6 +81,7 @@ struct fs_context {
 	FS_BUFFER_READ b_read;
 	FS_BUFFER_FREE b_free;
 
+	FS_SEND_TO send_to; /*use for udp*/
 	FS_WRITE_DATA write_data;
 	FS_CLOSE_CLIENT close_client;
 	FS_GET_VERSION get_version;

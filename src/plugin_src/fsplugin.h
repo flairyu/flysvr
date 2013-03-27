@@ -7,6 +7,8 @@ int on_new_client(struct fs_context* context, int cid);
 int on_recv_data(struct fs_context* context, int cid);
 int on_close_client(struct fs_context* context, int cid);
 int on_write_data(struct fs_context* context, int cid);
+int on_recv_from(struct fs_context* context, char* data, int length,
+		struct sockaddr_in* fromaddr);
 
 #endif
 
