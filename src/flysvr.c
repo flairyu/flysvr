@@ -39,6 +39,8 @@
 #include <signal.h>
 #include <dlfcn.h>
 #include <dirent.h>
+#include <sys/resource.h>
+#include <syslog.h>
 
 #define MAX_EVENTS 50  /*max process events count*/
 #define LISTEN_BACKLOG 50 /*max listen client count one time*/
@@ -49,35 +51,53 @@
 #define max(x,y) ((x)>(y)?(x):(y))
 
 static struct fs_client_list client_list = {0}; /* user list */
-static int epollfd = 0;
-static struct fs_context g_context = {0};
-static char VERSION[] = "1.0.20130324";
-static char PLUGIN_DIR[] = "./plugins/";
+static int epollfd = 0; //epoll fd for epoll_wait..
+static struct fs_context g_context = {0}; // global context
+static char VERSION[] = "1.0.20130324"; // version
+static char PLUGIN_DIR[] = "/etc/fsplugins/"; // plugin's directory
+static int loglevel = 10; // loglevel
 
+/**
+ * write log info into stdout or use syslog save into logfile.
+ * if level >= loglevel, the log will be ignored.
+ */
 void fs_log(int level, char* fmt, ...) {
 
-	char level_ch[5] = {'v', 'd', 'i', 'w', 'e' };
 	va_list args;
 	time_t  t;
-	assert(level <= LOG_E);
+
+	if(level>=loglevel) return;
+
 	va_start(args, fmt);
-	t = time(&t);
-	printf("[%c]",level_ch[level]);
-	vprintf(fmt, args);
-	printf("--%s", ctime(&t));
+	if (g_context.daemon_mode) {
+		vsyslog(level, fmt, args);
+	} else {
+		t = time(&t);
+		printf("[%d]",level);
+		vprintf(fmt, args);
+		printf("--%s", ctime(&t));
+		if(level==LOG_E) {
+			perror(fmt);
+		}
+	}
 	va_end(args);
 
-	if(level==LOG_E) {
-		perror(fmt);
-	}
 }
 
+/*
+ * init a fs_buffer. set fs_buffer's member into 0.
+ */
 void fs_buffer_init(struct fs_buffer* buff) {
 	buff->buff = NULL ; /* (char*) malloc ( FS_BUFFER_BLOCK_SIZE ); */
 	buff->bufflen = 0;
 	buff->datalen = 0;
 }
 
+/*
+ * write some data into fs_buffer, the buff's buff will be realloc
+ * if the buff.bufflen is less than datalen.
+ * after write, the buffer's datalen will be plus data's datalen.
+ */
 void fs_buffer_write(struct fs_buffer* buff, char* data, int datalen) {
 	assert(data!=NULL);
 	assert(buff!=NULL);
@@ -92,6 +112,10 @@ void fs_buffer_write(struct fs_buffer* buff, char* data, int datalen) {
 	buff->datalen += datalen;
 }
 
+/*
+ * read some data from buffer into data.
+ * return min(buff->datalen, datalen);
+ */
 int  fs_buffer_read(struct fs_buffer* buff, char* data, int datalen) {
 	assert(data!=NULL);
 	assert(buff!=NULL);
@@ -106,6 +130,9 @@ int  fs_buffer_read(struct fs_buffer* buff, char* data, int datalen) {
 	return readlen;
 }
 
+/*
+ * free a fs_buffer
+ */
 void fs_buffer_free(struct fs_buffer* buff) {
 	assert(buff!=NULL);
 	if (buff->buff != NULL) free(buff->buff);
@@ -114,6 +141,11 @@ void fs_buffer_free(struct fs_buffer* buff) {
 	buff->datalen = 0;
 }
 
+/*
+ * init a client instance.
+ * this client's fd,cid will be set to 0.
+ * and read,writebuffer will be call bs_buffer_init on them.
+ */
 void fs_client_init(struct fs_client* client) {
 	assert(client!=NULL);
 	client->fd = 0;
@@ -123,6 +155,9 @@ void fs_client_init(struct fs_client* client) {
 	fs_buffer_init(&client->writebuff);
 }
 
+/*
+ * free a client
+ */
 void fs_client_free(struct fs_client* client) {
 	if(client->fd!=0){
 		fs_log(LOG_I, "close cid:%d fd:%d", client->cid, client->fd);
@@ -135,6 +170,9 @@ void fs_client_free(struct fs_client* client) {
 	fs_buffer_free(&client->writebuff);
 }
 
+/*
+ * set a file descriptor into O_NONBLOCK flag.
+ */
 void setnonblocking(int fd) {
 	int flag = 0;
 	flag = fcntl(fd, F_GETFL, 0);
@@ -148,6 +186,10 @@ void setnonblocking(int fd) {
 	}
 }
 
+/*
+ * setup a socket that bind, listen, and ready for accept client.
+ * if some error happens, it will be exit().
+ */
 int setupListenSocket(int port) {
 	int sfd, retval;
 	struct sockaddr_in myaddr;
@@ -182,6 +224,9 @@ int setupListenSocket(int port) {
 	return sfd;
 }
 
+/*
+ * setup a udp socket for recvfrom() some client use udp.
+ */
 int setupUdpSocket(int port) {
 	int sfd, retval;
 	struct sockaddr_in myaddr;
@@ -210,7 +255,9 @@ int setupUdpSocket(int port) {
 	return sfd;
 }
 
-
+/*
+ * get a idle client from a 'idle client stack'.
+ */
 int get_idle_client(struct fs_client_list* list) {
 	int ci = 0;
 	if (list->idle_top >= MAX_CLIENT_COUNT) return -1; /* no idle client */
@@ -220,6 +267,9 @@ int get_idle_client(struct fs_client_list* list) {
 	return ci;
 }
 
+/*
+ * push a idle client into 'idle_client_stack'.
+ */
 int set_idle_client(struct fs_client_list* list, int ci) {
 	assert(ci<MAX_CLIENT_COUNT);
 	assert(list!=NULL);
@@ -231,17 +281,25 @@ int set_idle_client(struct fs_client_list* list, int ci) {
 	return 0;
 }
 
+/*
+ * add client with fd, addr, and add a epoll event on epollfd.
+ */
 int add_client_event(int epollfd, int fd, struct sockaddr* addr) {
 	struct epoll_event ev;
 	int cid = 0;
 	struct fs_client* client;
 	int i;
 
+	// use non blocking socket.
 	setnonblocking(fd);
+
+	// get a idle client instance.
 	cid = get_idle_client(&client_list);
 	if (cid > 0) {
+
+		// set up epoll event.
 		ev.events =  EPOLLIN | EPOLLOUT | EPOLLET | EPOLLERR | EPOLLRDHUP;
-		ev.data.u32 = cid; 
+		ev.data.u32 = cid; // save cid.
 		client = &client_list.clients[cid];
 		client->fd = fd;
 		client->cid = cid;
@@ -251,6 +309,7 @@ int add_client_event(int epollfd, int fd, struct sockaddr* addr) {
 		return -1;
 	}
 
+	// add epoll event.
 	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, 
 							&ev) == -1) {
 		set_idle_client(&client_list, cid);
@@ -266,6 +325,9 @@ int add_client_event(int epollfd, int fd, struct sockaddr* addr) {
 	return cid;
 }
 
+/*
+ * remove client event from epollfd.
+ */
 int del_client_event(int epollfd, struct epoll_event* ev) {
 	struct fs_client* client;
 	int i, cid = 0;
@@ -283,11 +345,17 @@ int del_client_event(int epollfd, struct epoll_event* ev) {
 	if (epoll_ctl(epollfd, EPOLL_CTL_DEL, client->fd, ev) == -1) {
 		fs_log(LOG_E, "epoll_ctl_del");
 	}
+
+	// set this client as idle client. and push it back into idle list.
 	if(cid<MAX_CLIENT_COUNT) set_idle_client(&client_list, cid);
 	fs_log(LOG_I, "del client cid:%d", cid);
 	return 0;
 }
 
+/*
+ * process read event. it will call read until read EAGAIN or EWOULDBLOCK
+ * and restore the data into client's readbuff.
+ */
 int process_read_event(int epollfd, struct epoll_event* ev) {
 	struct fs_client* client;
 	char rbuff[FS_BUFFER_BLOCK_SIZE];
@@ -315,6 +383,10 @@ int process_read_event(int epollfd, struct epoll_event* ev) {
 	return client->readbuff.datalen;
 }
 
+/*
+ * process write event. if the client that identified by ev.data.u32 
+ * it's writebuff.datalen>0, then call write until EAGAIN .
+ */
 int process_write_event(int epollfd, struct epoll_event* ev) {
 	struct fs_client* client;
 	char wbuff[FS_BUFFER_BLOCK_SIZE];
@@ -344,7 +416,11 @@ int process_write_event(int epollfd, struct epoll_event* ev) {
 	return write_total;
 }
 
+/*
+ * if there are read event happens, call all plugins interface to handler this.
+ */
 int on_read_data(struct fs_client_list* list, int cid) {
+	struct fs_client* client;
 	int i;
 	/*call event listener to process read event*/
 	for (i=0; i<g_context.event_listeners_count; i++) {
@@ -352,9 +428,16 @@ int on_read_data(struct fs_client_list* list, int cid) {
 			g_context.event_listeners[i].on_recv_data(&g_context, cid);
 		}
 	}
+
+	/*clear readbuff*/
+	client = &g_context.client_list->clients[cid];
+	client->readbuff.datalen = 0;
 	return 0;
 }
 
+/*
+ * if there are write event happens, call all plugins to handle them.
+ */
 int on_write_data(struct fs_client_list* list, int cid) {
 	int i;
 	/*call event listener to process write event*/
@@ -366,6 +449,9 @@ int on_write_data(struct fs_client_list* list, int cid) {
     return 0;
 }
 
+/*
+ * mainloop for epoll cicle.
+ */
 int mainLoop() {
 	struct epoll_event ev, events[MAX_EVENTS];
 	int listen_sock, conn_sock, nfds;
@@ -410,8 +496,9 @@ int mainLoop() {
 		}
 	}
 
+	/* main cicle */
 	for (;;) {
-		fs_log(LOG_I, "wait for epoll event..");
+		fs_log(LOG_D, "wait for epoll event..");
 		nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
 		if (nfds == -1) {
 			fs_log(LOG_E, "epoll_pwait");
@@ -450,20 +537,21 @@ int mainLoop() {
 					/*call event listener to process udp recv event*/
 					for (i=0; i<g_context.event_listeners_count; i++) {
 						if ( g_context.event_listeners[i].on_recv_from ) {
-							g_context.event_listeners[i].on_recv_from(&g_context, 
-									buff, recvlen, (struct sockaddr_in*)&local);
+							g_context.event_listeners[i].on_recv_from(
+										&g_context, buff, recvlen,
+										(struct sockaddr_in*)&local);
 						}
 					}
 				}
 			} else {
 				if (events[n].events & EPOLLRDHUP) {
-					fs_log(LOG_I, "EPOLLRDHUP");
+					fs_log(LOG_D, "EPOLLRDHUP");
 					del_client_event(epollfd, &events[n]);
 					continue;
 				} 
 				
 				if (events[n].events & EPOLLHUP) {
-					fs_log(LOG_I, "EPOLLHUP");
+					fs_log(LOG_D, "EPOLLHUP");
 					del_client_event(epollfd, &events[n]);
 					continue;
 				} 
@@ -476,7 +564,7 @@ int mainLoop() {
 
 				if (events[n].events & EPOLLIN) {
 					errid = process_read_event(epollfd, &events[n]);
-					fs_log(LOG_I, "EPOLLIN:%d", errid);
+					fs_log(LOG_D, "EPOLLIN:%d", errid);
 					if (errid>0) {
 						on_read_data(&client_list, events[n].data.u32);
 					} else if (errid<0) {
@@ -486,7 +574,7 @@ int mainLoop() {
 				
 				if (events[n].events & EPOLLOUT) {
 					errid = process_write_event(epollfd, &events[n]);
-					fs_log(LOG_I, "EPOLLOUT:%d", errid);
+					fs_log(LOG_D, "EPOLLOUT:%d", errid);
 					if (errid>0) {
 						on_write_data(&client_list, events[n].data.u32);
 					} else if (errid<0) {
@@ -500,13 +588,12 @@ int mainLoop() {
 		/* fs_log(LOG_I, "client_top:%d", client_list.idle_top); */
 	}
 
-	ev.events = EPOLLIN;
-	ev.data.u32 = 0;
-	del_client_event(epollfd, &ev);
-
 	return 0;
 }
 
+/*
+ * send some data to 'toaddr' via udp socket.
+ */
 int send_to(char* buffer, int buffer_len, struct sockaddr_in* toaddr) {
 	char buff[FS_BUFFER_BLOCK_SIZE];
 	int retval = 0;
@@ -517,6 +604,9 @@ int send_to(char* buffer, int buffer_len, struct sockaddr_in* toaddr) {
 	return retval;
 }
 
+/*
+ * write data via fd of client(index by cid)
+ */
 int write_data(char* buffer, int buffer_len, int cid) {
 	struct fs_client* client;
 	struct epoll_event ev;
@@ -529,16 +619,26 @@ int write_data(char* buffer, int buffer_len, int cid) {
 	return process_write_event(epollfd, &ev);
 }
 
+/*
+ * close a client
+ */
 int close_client(int cid) {
 	struct epoll_event ev;
 	ev.data.u32 = cid;
 	return del_client_event(epollfd, &ev);
 }
 
+/*
+ * return flysvr's version
+ */
 char* get_version() {
 	return VERSION;
 }
 
+/*
+ * load a plugin shared object from plugin's directory.
+ * every file name with .so will be loaded.
+ */
 void loadPlugin(char* filepath) {
 
 	struct fs_event_listener *listener;
@@ -606,6 +706,9 @@ void loadPlugin(char* filepath) {
 	g_context.event_listeners_count++;
 }
 
+/*
+ * load all plugins.
+ */
 void loadAllPlugins() {
 	char infile[255];
 	struct dirent *ptr = NULL;
@@ -625,6 +728,9 @@ void loadAllPlugins() {
 	fs_log(LOG_I, "load all plugins done.");
 }
 
+/*
+ * init all static variables.
+ */
 void initAll() {
 	int i=0;
 	
@@ -662,6 +768,11 @@ void initAll() {
 	loadAllPlugins();
 }
 
+/*
+ * close all client's fd
+ * release memory.
+ * close log fd.
+ */
 void releaseAll() {
 	struct epoll_event ev;
 	int i=0;
@@ -689,8 +800,12 @@ void releaseAll() {
 	}
 	
 	g_context.event_listeners_count = 0;
+	closelog();
 }
 
+/*
+ * process signals
+ */
 void sigrouter(int sig) {
 	switch(sig) {
 		case 1:
@@ -708,14 +823,119 @@ void sigrouter(int sig) {
 	return;
 }
 
-int main(int argc, char** argv) {
-	int num = 105;
-	signal(SIGHUP, sigrouter);
-	signal(SIGINT, sigrouter);
-	signal(SIGQUIT, sigrouter);
+/*
+ * make programe into daemon
+ */
+void daemonize(const char* cmd) {
+	int i, fd0, fd1, fd2;
+	pid_t pid;
+	struct rlimit rl;
+	struct sigaction sa;
 
+	/*
+	 * Clear file creation mask
+	 */
+	umask(0);
+
+	/*
+	 * Get maximum number of file descriptors
+	 */
+	if ( getrlimit(RLIMIT_NOFILE, &rl)<0 ) {
+		perror("getrlimit");
+	}
+
+	/*
+	 * Become a session leader to lose controlling TTY.
+	 */
+	if ( (pid=fork())<0 ) {
+		perror("fork");
+		exit(EXIT_FAILURE);
+	} else if (pid > 0) {
+		// parent
+		exit(0);
+	}
+	setsid();
+
+
+	/*
+	 * ignore some signals
+	 */
+	signal(SIGHUP, SIG_IGN); 
+	
+	/*
+	 * Ensure future opens won't allocate controlling TTY.
+	 */
+	if ( (pid=fork())<0 ) {
+		perror("fork2");
+		exit(EXIT_FAILURE); 
+	} else if (pid>0) {
+		//parent
+		exit(0);
+	}
+
+	/*
+	 * change the current working directory to the root so we
+	 * won't prevent file system from being unmounted.
+	 */
+	if ( chdir("/") < 0) {
+		perror("chdir to root");
+	}
+
+	/*
+	 * Close all open file descriptors
+	 */
+	if (rl.rlim_max == RLIM_INFINITY) rl.rlim_max = 1024;
+	for(i=0; i<rl.rlim_max; i++) {
+		close(i);
+	}
+
+	/*
+	 * Attach file descriptors 0, 1, 2 to /dev/null. (why?)
+	 */
+	fd0 = open("/dev/null", O_RDWR);
+	fd1 = dup(0);
+	fd2 = dup(0);
+
+	/*
+	 * initial the log file
+	 */
+	openlog(cmd, LOG_CONS, LOG_DAEMON);
+	if (fd0!=0 || fd1!=1 || fd2!=2) {
+		syslog(LOG_ERR, "unexpected file descritors %d, %d, %d", fd0, fd1, fd2);
+		exit(EXIT_FAILURE);
+	}
+    syslog(LOG_DEBUG, "deamon ok.");
+}
+
+/* flysvr by yxb */
+int main(int argc, char** argv) {
+	
+	//signal(SIGHUP, sigrouter);
+	//signal(SIGINT, sigrouter);
+	//signal(SIGQUIT, sigrouter);
+	signal(SIGTERM, sigrouter);
+
+	// enter deamon mode
+	if(argc<=2) {
+		daemonize("flysvr");
+		g_context.daemon_mode = 1;
+	} else {
+		g_context.daemon_mode = 0;
+	}
+
+	if(argc>=2) {
+		loglevel = atoi(argv[1]);
+	} else {
+		loglevel = LOG_D;
+	}
+
+	// init server
 	initAll();
+
+	// enter main loop
 	mainLoop();
+
+	// release all.
 	releaseAll();
 
 	return 0;
