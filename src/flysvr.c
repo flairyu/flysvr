@@ -430,8 +430,8 @@ int on_read_data(struct fs_client_list* list, int cid) {
 	}
 
 	/*clear readbuff*/
-	client = &g_context.client_list->clients[cid];
-	client->readbuff.datalen = 0;
+	//client = &g_context.client_list->clients[cid];
+	//client->readbuff.datalen = 0;
 	return 0;
 }
 
@@ -909,7 +909,12 @@ void daemonize(const char* cmd) {
 
 /* flysvr by yxb */
 int main(int argc, char** argv) {
-	
+
+	printf("fly server %s\n", get_version());
+	printf("written by YXB (flairyu), 2013.\n");
+	printf("visit http://www.ruanmianbao.com for more info.\n");
+	printf("have fun! ^_^\n");
+
 	//signal(SIGHUP, sigrouter);
 	//signal(SIGINT, sigrouter);
 	//signal(SIGQUIT, sigrouter);
