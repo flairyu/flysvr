@@ -1,7 +1,7 @@
 objects = fsplugin.o \
 
 CC = cc
-CFLAGS = -shared -fPIC 
+CFLAGS = -shared -fPIC -O
 
 fsplugin.so: $(objects)
 	$(CC) -o fsplugin.so $(CFLAGS) $(objects)
