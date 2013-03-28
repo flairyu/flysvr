@@ -53,7 +53,7 @@
 static struct fs_client_list client_list = {0}; /* user list */
 static int epollfd = 0; //epoll fd for epoll_wait..
 static struct fs_context g_context = {0}; // global context
-static char VERSION[] = "1.0.20130324"; // version
+static char VERSION[] = "1.0.20130330"; // version
 static char PLUGIN_DIR[] = "/etc/fsplugins/"; // plugin's directory
 static int loglevel = 10; // loglevel
 
@@ -701,9 +701,27 @@ void loadPlugin(char* filepath) {
 		exit(EXIT_FAILURE);
 	}
 
+	dlerror();
+	listener->on_load = dlsym(dp, "on_load");
+	errstr = dlerror();
+	if(errstr) {
+		fs_log(LOG_E, errstr);
+		exit(EXIT_FAILURE);
+	}
+
+	dlerror();
+	listener->on_release = dlsym(dp, "on_release");
+	errstr = dlerror();
+	if(errstr) {
+		fs_log(LOG_E, errstr);
+		exit(EXIT_FAILURE);
+	}
+
 	//dlclose(dp);
 	listener->dp = dp;
 	g_context.event_listeners_count++;
+
+	listener->on_load(&g_context);
 }
 
 /*
@@ -796,6 +814,7 @@ void releaseAll() {
 
 	/* close plugin libs */
 	for (i=0; i<g_context.event_listeners_count; i++) {
+		g_context.event_listeners[i].on_release(&g_context);
 		dlclose( g_context.event_listeners[i].dp );
 	}
 	

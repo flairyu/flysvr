@@ -71,6 +71,8 @@ typedef int (*FS_ON_CLOSE_CLIENT)(struct fs_context* context, int cid);
 typedef int (*FS_ON_WRITE_DATA)(struct fs_context* context, int cid);
 typedef int (*FS_ON_RECV_FROM)(struct fs_context* context, char* data, int length,
 		struct sockaddr_in* fromaddr);
+typedef int (*FS_ON_LOAD)(struct fs_context* context);
+typedef int (*FS_ON_RELEASE)(struct fs_context* context);
 
 typedef int (*FS_SEND_TO) (char* buffer, int buffer_len, 
 		struct sockaddr_in* toaddr);
@@ -105,6 +107,16 @@ struct fs_event_listener {
 	 * from a udp client.
 	 */
 	FS_ON_RECV_FROM on_recv_from; /*used for udp*/
+
+	/**
+	 * call this onloaded
+	 */
+	FS_ON_LOAD on_load;
+
+	/**
+	 * call this on released
+	 */
+	FS_ON_RELEASE on_release;
 };
 
 /* fs_context is a global context info list.
