@@ -1,0 +1,19 @@
+this is a plugin for fly sever.
+
+it's implements a logic modle for game 'king of snake',
+which is a multi-players online realtime 'snake' game.
+
+you can eat foot to grow up, and fire to other snake
+to attack them. if a snake's head touch any thing, the
+snake dead. or if the life is too low, it will also to die.
+
+developers:
+yxb
+uli2k
+
+date:
+2013-3-28
+
+copyright: yxb, uli2k.
+
+all right reserved.
