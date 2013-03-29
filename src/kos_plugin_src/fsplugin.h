@@ -29,6 +29,7 @@ struct kos_player {
 	int posx, posy; // position
 	int clock; // player's timer clock.
 	int delay; // player's delay
+	int status; // players's state.
 };
 
 struct kos_room {

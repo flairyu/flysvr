@@ -135,7 +135,7 @@ int process_login(struct fs_context* context,
 	player->posy = 0;
 	player->clock = 0;
 	player->delay = 0;
-
+	player->status = 0;
 	// reply: SIZE(4)|HEAD(4)|CMD(4)|PID(4)
 	send_cmd(context, cid, LOGIN, 1, pid);
 	context->log(LOG_D, "process_login: cid:%d pid:%d", cid, pid);
@@ -435,8 +435,8 @@ int process_game_cmd(struct fs_context* context,
 	rid = player->rid;
 	room = &kos.rooms[rid];
     topclock = 0;
-	for(i=0; i<room.player_count; i++) {
-		toplayer = &kos.players[room.players[i]];
+	for(i=0; i<room->player_count; i++) {
+		toplayer = &kos.players[room->players[i]];
 		if(topclock< (toplayer->clock+toplayer->delay)) {
 			topclock = (toplayer->clock+toplayer->delay);
 		}
@@ -445,8 +445,8 @@ int process_game_cmd(struct fs_context* context,
 	// fix clock
 	cmd->args[2] = topclock;
 
-	for(i=0; i<room.player_count; i++) {
-		toplayer = &kos.players[room.players[i]];
+	for(i=0; i<room->player_count; i++) {
+		toplayer = &kos.players[room->players[i]];
 		if(toplayer->cid) {
 			context->write_data(cmd->data, cmd->msglen+4, toplayer->cid);	
 		}
@@ -454,6 +454,139 @@ int process_game_cmd(struct fs_context* context,
 
 	return 1;
 }
+
+int process_game_start(struct fs_context* context, 
+		struct fs_client* client, 
+		int cid, 
+		COMMAND* cmd) {
+	int pid, action, rid, topclock, clock, allready;
+	struct kos_player* player, *toplayer;
+	struct kos_room* room;
+	int i, pindex;
+
+	// SIZE(4)|HEAD(4)|CMD(4)|PID(4)|ACTION(4)|CLOCK(4)|OTHER(x)
+	pid = cmd->args[0]; 
+	action = cmd->args[1]; // 1 host start. 2 game start.
+	clock = cmd->args[2];
+
+	player = &kos.players[pid];
+	rid = player->rid;
+	room = &kos.rooms[rid];
+
+	// 1 host start, 2 client start.
+	player->status = action;
+
+    topclock = 0;
+	allready = 1;
+	for(i=0; i<room->player_count; i++) {
+		toplayer = &kos.players[room->players[i]];
+		if(topclock< (toplayer->clock+toplayer->delay)) {
+			topclock = (toplayer->clock+toplayer->delay);
+		}
+		if(toplayer->status==0) {
+			allready = 0;
+		}
+	}
+	
+	// fix clock
+	cmd->args[2] = topclock;
+
+	for(i=0; i<room->player_count; i++) {
+		toplayer = &kos.players[room->players[i]];
+		if(toplayer->cid && ((action ==1)||(allready == 1))) {
+			context->write_data(cmd->data, cmd->msglen+4, toplayer->cid);	
+		}
+	}
+
+	return 1;
+}
+
+int process_game_stop(struct fs_context* context, 
+		struct fs_client* client, 
+		int cid, 
+		COMMAND* cmd) {
+	int pid, action, rid, topclock, clock, allready;
+	struct kos_player* player, *toplayer;
+	struct kos_room* room;
+	int i, pindex;
+
+	// SIZE(4)|HEAD(4)|CMD(4)|PID(4)|ACTION(4)|CLOCK(4)|OTHER(x)
+	pid = cmd->args[0]; 
+	action = cmd->args[1]; // 0 stop.
+	clock = cmd->args[2];
+
+	player = &kos.players[pid];
+	rid = player->rid;
+	room = &kos.rooms[rid];
+
+	// 0 stop. 1 host start, 2 client start.
+	player->status = action;
+
+    topclock = 0;
+	for(i=0; i<room->player_count; i++) {
+		toplayer = &kos.players[room->players[i]];
+		if(topclock< (toplayer->clock+toplayer->delay)) {
+			topclock = (toplayer->clock+toplayer->delay);
+		}
+	}
+	
+	// fix clock
+	cmd->args[2] = topclock;
+
+	for(i=0; i<room->player_count; i++) {
+		toplayer = &kos.players[room->players[i]];
+		if(toplayer->cid) {
+			context->write_data(cmd->data, cmd->msglen+4, toplayer->cid);	
+		}
+	}
+
+	return 1;
+}
+
+int process_clock(struct fs_context* context, 
+		struct fs_client* client, 
+		int cid, 
+		COMMAND* cmd) {
+	int pid, action, rid, topclock, clock, allready;
+	struct kos_player* player, *toplayer;
+	struct kos_room* room;
+	int i, pindex;
+
+	// SIZE(4)|HEAD(4)|CMD(4)|PID(4)|ACTION(4)|CLOCK(4)|OTHER(x)
+	pid = cmd->args[0]; 
+	clock = cmd->args[1];
+
+	player = &kos.players[pid];
+	rid = player->rid;
+	room = &kos.rooms[rid];
+	player->clock = clock;
+
+	return 1;
+}
+
+int process_delay(struct fs_context* context, 
+		struct fs_client* client, 
+		int cid, 
+		COMMAND* cmd) {
+	int pid, action, rid, topclock, delay, allready;
+	struct kos_player* player, *toplayer;
+	struct kos_room* room;
+	int i, pindex;
+
+	// SIZE(4)|HEAD(4)|CMD(4)|PID(4)|ACTION(4)|CLOCK(4)|OTHER(x)
+	pid = cmd->args[0]; 
+	delay = cmd->args[1];
+
+	player = &kos.players[pid];
+	rid = player->rid;
+	room = &kos.rooms[rid];
+	player->delay = delay;
+
+	context->write_data(cmd->data, cmd->msglen+4, cid);
+
+	return 1;
+}
+
 
 int on_new_client(struct fs_context* context, int cid) {
 	return 1;
@@ -527,12 +660,16 @@ int on_recv_data(struct fs_context* context, int cid) {
 			process_game_cmd(context, client, cid, &cmd);
 			break;
 		case GAME_START:
+			process_start(context, client, cid, &cmd);
 			break;
 		case GAME_STOP:
+			process_stop(context, client, cid, &cmd);
 			break;
 		case DELAY_TEST:
+			process_delay(context, client, cid, &cmd);
 			break;
 		case CLOCK:
+			process_clock(context, client, cid, &cmd);
 			break;
 	};
 
