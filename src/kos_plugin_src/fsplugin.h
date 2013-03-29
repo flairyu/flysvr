@@ -59,16 +59,17 @@ enum kos_msg {
 	LOGOUT = 2, // ARGS:NONE.
 	CREATE = 3, //create room. ARGS:NONE. return created room id.
 	JOIN = 4,   //join room. ARG1:room id.
-	LEAVE = 5,  //leave room
-	KICK = 6,	//kick player
-	MESSAGE = 7, //chatmessage
-	ROOM_MSG = 8, //room message
-	BROAD_MSG = 9, //message to everyone
-	GAME_CMD = 10, //game controlling commands. like 'fire','move'
-	GAME_START = 11, //start game
-	GAME_STOP = 12, //stop game (with result)
-	DELAY_TEST = 13, //delay test
-	CLOCK = 14, //sync clock.
+	LIST = 5,   //list all the rooms.
+	LEAVE = 6,  //leave room
+	KICK = 7,	//kick player
+	MESSAGE = 8, //chatmessage
+	ROOM_MSG = 9, //room message
+	BROAD_MSG = 10, //message to everyone
+	GAME_CMD = 11, //game controlling commands. like 'fire','move'
+	GAME_START = 12, //start game
+	GAME_STOP = 13, //stop game (with result)
+	DELAY_TEST = 14, //delay test
+	CLOCK = 15, //sync clock.
 };
 
 /*

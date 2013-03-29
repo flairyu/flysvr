@@ -254,6 +254,39 @@ int process_join(struct fs_context* context,
 	return rid;
 }
 
+int process_list(struct fs_context* context, 
+		struct fs_client* client, 
+		int cid, 
+		COMMAND* cmd) {
+	int pid, rid, result;
+	struct kos_player* player, *temp;
+	struct kos_room* room;
+	int i;
+	
+	// SIZE(4)|HEAD(4)|CMD(4)|PID(4)
+	pid = cmd->args[0]; 
+	if(pid >= MAX_IDLE_PLAYER){
+		context->log(LOG_W, "kos:list:pid is out of range. pid:%d",
+				pid);
+		return 0;
+	}
+	player = &kos.players[pid];
+
+	for(i=1; i<kos.idle_room; i++) {
+		room = &kos.rooms[kos.idle_rooms[i]];
+		if (room->host_pid <0 || room->host_pid>=MAX_IDLE_PLAYER) {
+			context->log(LOG_W, "kos:list:host_pid is out of range. host_pid:%d",
+					room->host_pid);
+			continue;
+		}
+		// SIZE|HEAD|LIST|MAX_COUNT|ROOMID|RTYPE|MAXPLAYERCOUNT|PLAYERCOUNT|HOSTPID
+		send_cmd(context, cid, LIST, 6, kos.idle_room, room->rid, room->type,
+				MAX_PLAYER_COUNT, room->player_count, room->host_pid);
+	}
+
+	return kos.idle_room;
+}
+
 int process_leave(struct fs_context* context, 
 		struct fs_client* client, 
 		int cid, 
@@ -640,6 +673,9 @@ int on_recv_data(struct fs_context* context, int cid) {
 			break;
 		case JOIN:
 			process_join(context, client, cid, &cmd);
+			break;
+		case LIST:
+			process_list(context, client, cid, &cmd);
 			break;
 		case LEAVE:
 			process_leave(context, client, cid, &cmd);
