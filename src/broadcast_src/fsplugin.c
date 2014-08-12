@@ -45,7 +45,8 @@ int on_recv_from(struct fs_context* context, char* data, int length,
 	
 	found = 0;
 	for (i=0; i<MIN(addrs_count,10); i++) {
-		if (*fromaddr == addrs[i]) {
+		if (fromaddr->sin_addr.s_addr==addrs[i].sin_addr.s_addr &&
+				fromaddr->sin_port==addrs[i].sin_port) {
 			found = 1;
 		} else {
 			retval = context->send_to(data, length, fromaddr);
