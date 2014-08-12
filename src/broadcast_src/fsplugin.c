@@ -6,6 +6,14 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
+int on_load(struct fs_context* context) {
+	return 0;
+}
+
+int on_release(struct fs_context* context) {
+	return 0;
+}
+
 int on_new_client(struct fs_context* context, int cid) {
 	context->log(LOG_I, "fsplugin: on_new_client");
 	return 1;
